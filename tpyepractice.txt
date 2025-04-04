@@ -1,0 +1,218 @@
+// --- EJERCICIO 1 ---
+
+// TODO: Tipar estas variables
+const taskTitle : string = "Implementar autenticación con Appwrite";
+const taskPriority : string = "high"; // Debe ser una de las prioridades válidas
+const creationDate : string = "2023-10-28T09:00:00.000Z"; // Fecha como string ISO
+const isUrgent: boolean = true;
+let assignedUser: string | null = null; // Podría tener un ID de usuario o ser null
+
+// TODO: Tipar este objeto para que coincida con la estructura de TaskDocument (parcialmente)
+//       Asegúrate de que las propiedades coincidan con la interfaz TaskDocument.
+//       No necesitas todos los campos de Appwrite ($collectionId, etc.) por ahora,
+//       pero sí los campos de datos principales. Usa la interfaz TaskDocument como guía.
+interface TaskDocument {
+    title : string;
+    description: string;
+    isCompleted: boolean;
+    priority: string;
+    dueDate: string | null;
+    userId: string
+}
+const newTaskData :TaskDocument= {
+  title: "Diseñar componente de Task Card",
+  description: "Crear el diseño en Figma y luego implementarlo en React",
+  isCompleted: false,
+  priority: "medium",
+  dueDate: null,
+  userId: "user-xyz"
+  // Faltan los campos de Appwrite como $id, $createdAt, etc. ¿Cómo manejarías esto
+  // si este objeto representa los *datos a enviar* para crear una tarea?
+  // Pista: Piensa en Omit o crea un tipo específico.
+};
+
+// TODO: Tipar esta lista de tareas obtenidas de la API
+//       Usa la interfaz TaskDocument.
+const fetchedTasks: CompleteTaskDocument[] = [
+  {
+    $id: "task-789",
+    $collectionId: "tasks",
+    $databaseId: "main",
+    $createdAt: "2023-10-26T15:00:00.000Z",
+    $updatedAt: "2023-10-26T15:00:00.000Z",
+    $permissions: [],
+    title: "Revisar documentación de Next.js 14",
+    isCompleted: true,
+    priority: "low",
+    dueDate: "2023-10-30T23:59:59.000Z",
+    userId: "user-abc"
+  },
+  // ... potencialmente más tareas
+];
+interface CompleteTaskDocument extends TaskDocument {
+    $id: string;
+    $collectionId: string;
+    $databaseId: string;
+    $createdAt: string;
+    $updatedAt: string;
+    $permissions: string[];
+
+}
+type FetchedTasks= CompleteTaskDocument[] 
+type loading = 'loading' | 'loaded'
+// TODO: Tipar el estado de carga actual
+let dataLoadingState: loading = 'loading'; // Debe ser uno de los LoadingStatus válidos
+
+// --- EJERCICIO 2 ---
+import { ID } from 'appwrite'; // Asumimos importación
+import { FC } from 'react';
+
+// TODO: Tipar los parámetros y el valor de retorno de esta función.
+//       Debe aceptar un objeto de tarea (TaskDocument) y devolver un boolean.
+function isTaskOverdue(task: string):boolean|string  {
+  if (!task.dueDate) {
+    return false;
+  }
+  const dueDate = new Date(task.dueDate); // Convertimos string a Date para comparar
+  const now = new Date();
+  return dueDate < now && !task.isCompleted;
+}
+
+// TODO: Tipar esta función que simula la creación de una tarea en Appwrite.
+//       Parámetros: Los datos necesarios para crear la tarea (piensa qué tipo usarías aquí, ¿TaskDocument completo?)
+//                   Una instancia del SDK de Databases de Appwrite.
+//       Retorno: Una Promise que resuelve con el documento de la tarea creada (TaskDocument).
+async function createTaskInAppwrite(taskData: TaskDocument, databases: string):Promise<CompleteTaskDocument> {
+  console.log("Creando tarea:", taskData.title);
+  // Simulación de llamada a Appwrite
+  // const createdDocument = await databases.createDocument(
+  //   'main',        // databaseId
+  //   'tasks',       // collectionId
+  //   ID.unique(),   // documentId (Appwrite genera uno único)
+  //   taskData       // payload
+  // );
+
+  // Simulación de respuesta (añadiendo campos de Appwrite)
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const createdDocument = {
+    ...taskData, // Incluye title, description, etc.
+    $id: ID.unique(), // Genera un ID simulado
+    $collectionId: "tasks",
+    $databaseId: "main",
+    $createdAt: new Date().toISOString(),
+    $updatedAt: new Date().toISOString(),
+    $permissions: [`read("user:${taskData.userId}")`, `update("user:${taskData.userId}")`],
+  };
+
+  console.log("Tarea creada con ID:", createdDocument.$id);
+  return createdDocument;
+}
+
+// TODO: Tipar las props de este componente funcional de React/Next.js
+//       Usa una interfaz o un tipo.
+function TaskListComponent({ tasks, onTaskClick, isLoading}:{tasks: TaskDocument, onTaskClick: void, isLoading: loading}):FC<React.Component> {
+  if (isLoading) {
+    return <div>Cargando tareas...</div>;
+  }
+
+  if (tasks.length === 0) {
+    return <div>No hay tareas.</div>;
+  }
+
+  return (
+    <ul>
+      {tasks.map(task => (
+        <li key={task.$id} onClick={() => onTaskClick(task.$id)}>
+          {task.title} ({task.priority}) - {task.isCompleted ? 'Completada' : 'Pendiente'}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+
+// --- EJERCICIO 3 ---
+
+// TODO: Tipar esta función genérica que actualiza campos específicos de un documento en Appwrite.
+//       Parámetros: IDs de DB, colección, documento.
+//                   Un objeto con los campos a actualizar (payload). ¡Este payload debe ser parcial!
+//                   La instancia del SDK de Databases.
+//       Retorno: Una Promise que resuelve con el documento actualizado (completo).
+//       Restricción: El tipo genérico T debe representar un documento de Appwrite (tener $id, etc.)
+type PartialTaskUpdate = Partial<Omit<TaskDocument,'$id' | '$collectionId' | '$databaseId' | '$createdAt' | '$updatedAt' | '$permissions' | 'userId' >>
+
+async function updateDocumentFields<T>(
+  databaseId: string,
+  collectionId: string,
+  documentId: string,
+  payload: PartialTaskUpdate, // ¿Qué tipo debería tener este payload? Piensa en Partial y Omit/Pick.
+  databases: string
+) {
+  console.log(`Actualizando documento ${documentId} con:`, payload);
+  // Simulación de llamada a Appwrite
+  // const updatedDocument = await databases.updateDocument<T>(
+  //   databaseId,
+  //   collectionId,
+  //   documentId,
+  //   payload
+  // );
+
+  // Simulación de respuesta (asumimos que la API devuelve el objeto completo actualizado)
+  await new Promise(resolve => setTimeout(resolve, 200));
+  // En una implementación real, obtendríamos el documento actualizado de la respuesta
+  // Aquí simulamos obtener el documento existente y fusionar los cambios
+  const existingDoc = { /* ... obtener el doc existente ... */ } as T; // Simulación
+  const updatedDocument = { ...existingDoc, ...payload, $updatedAt: new Date().toISOString() };
+
+  return updatedDocument;
+}
+
+// Ejemplo de cómo se usaría (NO MODIFICAR, solo para contexto):
+// Supongamos que 'databases' es la instancia del SDK y 'taskId' es un string con el ID.
+/*
+const changes: Partial<Pick<TaskDocument, 'isCompleted' | 'priority'>> = {
+    isCompleted: true,
+    priority: 'low'
+};
+updateDocumentFields<TaskDocument>('main', 'tasks', taskId, changes, databases)
+    .then(updatedTask => {
+        console.log('Tarea actualizada:', updatedTask.title, updatedTask.isCompleted);
+    });
+*/
+
+
+// TODO: Define un tipo `UserPreferences` usando la interfaz `UserProfile` de los ejemplos.
+//       Este nuevo tipo debe tener `name` y `email` como campos requeridos,
+//       pero `avatarUrl` debe seguir siendo opcional.
+//       Pista: Combina Utility Types como Required, Pick, y/o Intersection (&).
+interface UserProfile { // (Recordatorio de la interfaz del ejemplo)
+  name?: string;
+  email?: string;
+  avatarUrl?: string;
+  theme?: 'light' | 'dark';
+}
+
+// Define aquí tu tipo UserPreferences
+type UserPreferences = Required<Pick<UserProfile, 'name' | 'email' >>& Partial<Pick<UserProfile, 'avatarUrl' | 'theme'>>
+
+// TODO: Tipar esta función que agrupa tareas por prioridad.
+//       Retorno: Un objeto donde las claves son las prioridades ('low', 'medium', 'high')
+//                y los valores son arrays de tareas (TaskDocument[]) con esa prioridad.
+//       Pista: Usa el Utility Type Record<K, T>.
+
+type TasksPriority = Record<TaskDocument['priority'], "low"|"medium"|"high">
+
+
+function groupTasksByPriority(tasks:TasksPriority):string[] {
+  const groupedTasks = {
+    low: [],
+    medium: [],
+    high: [],
+  };
+
+  tasks.forEach(task => {
+    // Asegúrate de que el acceso a groupedTasks[task.priority] sea seguro en tipos.
+    groupedTasks[task.priority].push(task);
+  });
+
+  return groupedTasks;
