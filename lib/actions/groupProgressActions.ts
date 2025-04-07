@@ -23,7 +23,6 @@ const databaseId = appwriteConfig.databaseId
 const groupProgressCollectionId = appwriteConfig.groupProgressCollectionId
 
 
-
 function safeParseExerciseStates(jsonString: string | null | undefined): { [key: string]: ExerciseState } {
     if (jsonString === null || jsonString === undefined || jsonString === "") {
         return {}
@@ -140,17 +139,17 @@ export async function updateGroupProgress(
         if (updatedData.exerciseStates) {
             dataToUpdate.exerciseStates = JSON.stringify(updatedData.exerciseStates)
         } else if (updatedData.hasOwnProperty('exerciseStates') && updatedData.exerciseStates === undefined) {
-         
+
             delete dataToUpdate.exerciseStates;
         }
-    
+
 
         if (Object.keys(dataToUpdate).length === 0) {
             console.log("No hay datos para actualizar. Returning current state might be needed or throw error.");
-   
-             const currentDoc = await databases.getDocument<GroupProgressDocument>(databaseId, groupProgressCollectionId, documentId);
-             return currentDoc;
-  
+
+            const currentDoc = await databases.getDocument<GroupProgressDocument>(databaseId, groupProgressCollectionId, documentId);
+            return currentDoc;
+
         }
 
         const updatedDocument = await databases.updateDocument<GroupProgressDocument>(
@@ -166,3 +165,46 @@ export async function updateGroupProgress(
         throw new Error(`Failed to update GroupProgress: ${error instanceof Error ? error.message : String(error)}`)
     }
 }
+export async function handleExerciseCompletion(userId: string,
+    context: string,
+    groupId: string,
+    melodyLength: number,
+    accuracy: number){
+try{
+    const currentProgress = await getGroupProgressParsed(userId, context, groupId)
+    if (!currentProgress) {
+        console.error("Progress not found, cannot update.");
+         throw new Error("Progress document not found for update.");
+    }
+    const exerciseKey = String(melodyLength);
+    const currentExerciseState = currentProgress.exerciseStates[exerciseKey];
+    if (!currentExerciseState) {
+        console.error(`Exercise state for length ${melodyLength} not found.`);
+         throw new Error(`Exercise state for length ${melodyLength} not found.`);
+    }
+    let newBPM=currentExerciseState.currentBPM
+    if(accuracy>=0.8 && newBPM<180){
+        newBPM=Math.min(currentExerciseState.currentBPM+5,180)
+    }
+    const updatedExerciseStates= {
+        ...currentProgress.exerciseStates,
+        [exerciseKey]:{
+            ...currentExerciseState,
+            currentBPM: newBPM,
+            accuracyLastAttempt: accuracy,
+        }
+    }
+    const updatedData = {
+        exerciseStates: updatedExerciseStates,
+        lastPracticed: new Date().toISOString()
+    }
+    await updateGroupProgress(currentProgress.$id, updatedData)
+    console.log(`Server Action: Progress updated successfully for user ${userId}, group ${groupId}. New BPM: ${newBPM}`);
+    return{success:true, newBPM: newBPM}
+}catch (error) {
+    console.error("Error in handleExerciseCompletion Server Action:", error);
+    return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
+}
+
+}
+
