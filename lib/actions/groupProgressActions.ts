@@ -3,6 +3,7 @@ import { ID, Query, Databases, Models, Client } from "node-appwrite";
 import { createAdminClient, createSessionClient } from "../appwrite";
 import { appwriteConfig } from "../appwrite/config";
 
+
 export interface ExerciseState {
     currentBPM: number;
     accuracyLastAttempt: number | null;
@@ -24,19 +25,22 @@ const groupProgressCollectionId = appwriteConfig.groupProgressCollectionId
 
 
 function safeParseExerciseStates(jsonString: string | null | undefined): { [key: string]: ExerciseState } {
-    if (jsonString === null || jsonString === undefined || jsonString === "") {
-        return {}
+    if (!jsonString) {
+        console.log("safeParseExerciseStates: Input is null or empty, returning {}.");
+        return {};
     }
     try {
-        const parsed = JSON.parse(jsonString)
+        const parsed = JSON.parse(jsonString);
+        console.log("safeParseExerciseStates: JSON.parse successful. Type:", typeof parsed, "Value:", parsed);
         if (typeof parsed === 'object' && parsed !== null) {
             return parsed;
+        } else {
+            console.warn("safeParseExerciseStates: Parsed data is not a non-null object. Type:", typeof parsed);
+            return {};
         }
-        console.warn("Parsed exerciseStates JSON is not an object:", parsed);
-        return {};
     } catch (e) {
-        console.error("Error parsing exerciseStates Json:", e, "String was:", jsonString)
-        return {}
+        console.error("safeParseExerciseStates: Error during JSON.parse:", e, "Input string was:", jsonString);
+        return {};
     }
 }
 
@@ -102,7 +106,7 @@ export async function createGroupProgress(
         }
 
         const initialExerciseStatesString = JSON.stringify(initialExerciseStatesObject)
-
+        console.log("DEBUG: String being saved by createGroupProgress:", initialExerciseStatesString);
         const newDocumentData = {
             userID,
             context,
@@ -112,6 +116,8 @@ export async function createGroupProgress(
             isActive: true,
             lastPracticed: new Date().toISOString()
         };
+        console.log("DEBUG createGroupProgress: Saving data:", newDocumentData);
+        console.log("DEBUG createGroupProgress: Type of exerciseStates being saved:", typeof newDocumentData.exerciseStates);
         const newDocument = await databases.createDocument<GroupProgressDocument>(
             databaseId,
             groupProgressCollectionId,
@@ -169,42 +175,144 @@ export async function handleExerciseCompletion(userId: string,
     context: string,
     groupId: string,
     melodyLength: number,
-    accuracy: number){
-try{
-    const currentProgress = await getGroupProgressParsed(userId, context, groupId)
-    if (!currentProgress) {
-        console.error("Progress not found, cannot update.");
-         throw new Error("Progress document not found for update.");
-    }
-    const exerciseKey = String(melodyLength);
-    const currentExerciseState = currentProgress.exerciseStates[exerciseKey];
-    if (!currentExerciseState) {
-        console.error(`Exercise state for length ${melodyLength} not found.`);
-         throw new Error(`Exercise state for length ${melodyLength} not found.`);
-    }
-    let newBPM=currentExerciseState.currentBPM
-    if(accuracy>=0.8 && newBPM<180){
-        newBPM=Math.min(currentExerciseState.currentBPM+5,180)
-    }
-    const updatedExerciseStates= {
-        ...currentProgress.exerciseStates,
-        [exerciseKey]:{
-            ...currentExerciseState,
-            currentBPM: newBPM,
-            accuracyLastAttempt: accuracy,
+    accuracy: number) {
+    try {
+        const currentProgress = await getGroupProgressParsed(userId, context, groupId)
+        if (!currentProgress) {
+            console.error("Progress not found, cannot update.");
+            throw new Error("Progress document not found for update.");
         }
+        const exerciseKey = String(melodyLength);
+        console.log("DEBUG: Accessing state with key:", exerciseKey, " (melodyLength:", melodyLength, ")")
+        console.log("DEBUG: Full exerciseStates object:", currentProgress.exerciseStates);
+        const currentExerciseState = currentProgress.exerciseStates[exerciseKey];
+        if (!currentExerciseState) {
+            console.error(`Exercise state for length ${melodyLength} not found.`);
+            throw new Error(`Exercise state for length ${melodyLength} not found.`);
+        }
+        let newBPM = currentExerciseState.currentBPM
+        if (accuracy >= 0.8 && newBPM < 180) {
+            newBPM = Math.min(currentExerciseState.currentBPM + 5, 180)
+        }
+        const updatedExerciseStates = {
+            ...currentProgress.exerciseStates,
+            [exerciseKey]: {
+                ...currentExerciseState,
+                currentBPM: newBPM,
+                accuracyLastAttempt: accuracy,
+            }
+        }
+        const updatedData = {
+            exerciseStates: updatedExerciseStates,
+            lastPracticed: new Date().toISOString()
+        }
+        console.log("DEBUG handleExerciseCompletion: Data BEFORE calling updateGroupProgress:", updatedData);
+        console.log("DEBUG handleExerciseCompletion: Type of exerciseStates in updatedData:", typeof updatedData.exerciseStates); 
+        if(updatedData.exerciseStates) console.log("DEBUG handleExerciseCompletion: exerciseStates OBJECT:", updatedData.exerciseStates);
+        await updateGroupProgress(currentProgress.$id, updatedData)
+        console.log(`Server Action: Progress updated successfully for user ${userId}, group ${groupId}. New BPM: ${newBPM}`);
+        return { success: true, newBPM: newBPM }
+    } catch (error) {
+        console.error("Error in handleExerciseCompletion Server Action:", error);
+        return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
     }
-    const updatedData = {
-        exerciseStates: updatedExerciseStates,
-        lastPracticed: new Date().toISOString()
-    }
-    await updateGroupProgress(currentProgress.$id, updatedData)
-    console.log(`Server Action: Progress updated successfully for user ${userId}, group ${groupId}. New BPM: ${newBPM}`);
-    return{success:true, newBPM: newBPM}
-}catch (error) {
-    console.error("Error in handleExerciseCompletion Server Action:", error);
-    return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
 }
 
+export async function completeAndGetNextExercise(userId: string,
+    context: string,
+    completedGroupId: string,
+    completedMelodyLength: number,
+    accuracy: number): Promise<{
+        success: true; nextExercise: {
+            groupID: string;
+            melodyLength: number;
+            bpm: number;
+        }
+    } | {
+        success: false;
+        error: string;
+    }> {
+    console.log(`completeAndGetNextExercise: Starting for user ${userId} after completing group ${completedGroupId}, length ${completedMelodyLength}`);
+    const updateResult = await handleExerciseCompletion(
+        userId,
+        context,
+        completedGroupId,
+        completedMelodyLength,
+        accuracy
+    )
+    if (!updateResult.success) {
+        console.error("completeAndGetNextExercise: Failed during handleExerciseCompletion. Cannot determine next exercise.");
+        return { success: false, error: updateResult.error || "Unknown error" };
+    }
+    const nextGroupID = completedGroupId;
+    const nextMelodyLength = completedMelodyLength;
+    const nextBPM = updateResult.newBPM;
+
+
+    if (typeof nextBPM !== 'number') {
+        return { success: false, error: "BPM value is undefined" };
+    }
+
+    console.log(`completeAndGetNextExercise: Next exercise determined (MVP Logic) -> Group: ${nextGroupID}, Length: ${nextMelodyLength}, BPM: ${nextBPM}`);
+    return {
+        success: true,
+        nextExercise: {
+            groupID: nextGroupID,
+            melodyLength: nextMelodyLength,
+            bpm: nextBPM,
+        },
+    };
 }
 
+export async function getFirstExercise(
+    userID: string,
+    context: string,
+    initialGroupID: string,
+    initialLevel: number
+): Promise<{
+    success: true;
+    exerciseParams: {
+        groupID: string;
+        melodyLength: number;
+        bpm: number;
+    }
+} | {
+    success: false;
+    error: string;
+}> {
+    console.log(`getFirstExercise: Attempting to find or create progress for user ${userID}, context ${context}, group ${initialGroupID}`);
+    try {
+        let progressDoc = await getGroupProgressParsed(userID, context, initialGroupID);
+        let exerciseBPM: number;
+        const initialMelodyLength = 2;
+        if (progressDoc) {
+            console.log(`getFirstExercise: Found existing progress document ${progressDoc.$id}`);
+            const exerciseState = progressDoc.exerciseStates[String(initialMelodyLength)];
+            if (exerciseState && exerciseState.unlocked) {
+                exerciseBPM = exerciseState.currentBPM;
+                console.log(`getFirstExercise: Using existing BPM ${exerciseBPM} for length ${initialMelodyLength}`);
+            } else {
+                console.warn(`getFirstExercise: Exercise state for length ${initialMelodyLength} not found or not unlocked in existing doc. Defaulting to 60 BPM.`);
+                exerciseBPM = 60;
+            }
+        } else {
+            console.log(`getFirstExercise: No progress found. Creating new document.`);
+            const newDoc = await createGroupProgress(userID, context, initialGroupID, initialLevel);
+            exerciseBPM = 60;
+            progressDoc = await getGroupProgressParsed(userID, context, initialGroupID);
+            if (!progressDoc) throw new Error("Failed to retrieve the document immediately after creation.");
+            console.log(`getFirstExercise: Created new progress document ${progressDoc.$id}. Starting BPM: ${exerciseBPM}`);
+        }
+        return {
+            success: true,
+            exerciseParams: {
+                groupID: initialGroupID,
+                melodyLength: initialMelodyLength,
+                bpm: exerciseBPM,
+            }
+        };
+    } catch (error) {
+        console.error("Error in getFirstExercise:", error);
+        return { success: false, error: error instanceof Error ? error.message : "Unknown error determining first exercise" };
+    }
+}
