@@ -80,9 +80,6 @@ export interface SequencePlayerControls {
   readonly isPlaying: boolean;
   onStop: (() => void) | null;
 }
-
-const TOLERANCE: number = 1e-9;
-
 export const durationValues: DurationMap = Object.freeze({
   "32n": 1 / 8, "16n": 1 / 4, "16n.": 3 / 8, "8n": 1 / 2, "8n.": 3 / 4,
   "4n": 1, "4n.": 1.5, "2n": 2, "2n.": 3, "1n": 4
@@ -91,6 +88,8 @@ export const durationValues: DurationMap = Object.freeze({
 const durationStrings = Object.keys(durationValues) as DurationString[];
 
 const absoluteMinDurationValue: number = Math.min(...Object.values(durationValues));
+
+const TOLERANCE: number = 1e-9;
 
 const getDurationValue = (notation: string): number =>
     durationValues[notation as DurationString] ?? durationValues["16n"];
@@ -114,179 +113,187 @@ export const rhythmGenerator = ({
   allowRests = true,
   restProbability = 0.2
 }: RhythmGeneratorOptions = {}): RhythmEvent[] => {
+  let currentShortest: DurationString = shortestDuration as DurationString;
+  let currentLongest: DurationString = longestDuration as DurationString;
+  let minDurationValue: number = getDurationValue(currentShortest);
+  let maxDurationValue: number = getDurationValue(currentLongest);
 
-    let currentShortest: DurationString = shortestDuration;
-    let currentLongest: DurationString = longestDuration;
-    let minDurationValue: number = getDurationValue(currentShortest);
-    let maxDurationValue: number = getDurationValue(currentLongest);
+  if (minDurationValue > maxDurationValue) {
+    [currentShortest, currentLongest] = [currentLongest, currentShortest];
+    [minDurationValue, maxDurationValue] = [maxDurationValue, minDurationValue];
+  }
 
-    if (minDurationValue > maxDurationValue) {
-        [currentShortest, currentLongest] = [currentLongest, currentShortest];
-        [minDurationValue, maxDurationValue] = [maxDurationValue, minDurationValue];
+  if (!allowRests) {
+    return generateFixedNumberOfNotes(n, minDurationValue, maxDurationValue, currentShortest);
+  } else {
+    return generateRhythmWithRests(totalBeats, n, minDurationValue, maxDurationValue, 
+      currentShortest, restProbability);
+  }
+  
+  function generateFixedNumberOfNotes(
+    noteCount: number, 
+    minValue: number, 
+    maxValue: number,
+    defaultDuration: DurationString
+  ): RhythmEvent[] {
+    const localResult: RhythmEvent[] = [];
+    const availableNoteDurations = durationStrings
+      .map(name => ({ name, value: durationValues[name] }))
+      .filter(({ value }) => value >= minValue - TOLERANCE && value <= maxValue + TOLERANCE);
+
+    if (availableNoteDurations.length === 0) {
+      console.warn("No available durations found for the given constraints in generateFixedNumberOfNotes.");
+      return [];
     }
 
-    function generateFixedNumberOfNotes(
-        noteCount: number,
-        minValue: number,
-        maxValue: number
-    ): RhythmEvent[] {
-        const localResult: RhythmEvent[] = [];
-        const availableNoteDurations = durationStrings
-          .map(name => ({ name, value: durationValues[name] }))
-          .filter(({ value }) => value >= minValue - TOLERANCE && value <= maxValue + TOLERANCE);
+    for (let i = 0; i < noteCount; i++) {
+      const randomIndex: number = Math.floor(Math.random() * availableNoteDurations.length);
+      const randomDuration = availableNoteDurations[randomIndex];
+      localResult.push({
+        type: "note",
+        duration: randomDuration.name,
+        value: randomDuration.value
+      });
+    }
+    
+    return localResult;
+  }
+  
+  function generateRhythmWithRests(
+    targetTotalBeats: number,
+    targetNotes: number,
+    minValue: number,
+    maxValue: number,
+    defaultShortestDuration: DurationString,
+    restProb: number
+  ): RhythmEvent[] {
+    const localResult: RhythmEvent[] = [];
+    let remainingBeats: number = targetTotalBeats;
+    let actualNotes: number = 0;
+    let remainingNotesToPlace: number = targetNotes;
 
-        if (availableNoteDurations.length === 0) {
-            console.warn("No available durations found for the given constraints in generateFixedNumberOfNotes.");
-            return [];
-        }
+    const availableDurations = durationStrings
+      .map(name => ({ name, value: durationValues[name] }))
+      .filter(({ value }) => value >= minValue - TOLERANCE && value <= maxValue + TOLERANCE)
+      .sort((a, b) => a.value - b.value);
 
-        for (let i = 0; i < noteCount; i++) {
-            const randomIndex: number = Math.floor(Math.random() * availableNoteDurations.length);
-            const randomDuration = availableNoteDurations[randomIndex];
+    if (availableDurations.length === 0) {
+      console.warn("No available durations found for the given constraints in generateRhythmWithRests.");
+      return [];
+    }
+
+    const minSpaceForAllNotes = targetNotes * minValue;
+    
+    if (minSpaceForAllNotes > targetTotalBeats + TOLERANCE) {
+      console.warn(`Cannot fit ${targetNotes} notes with minimum duration ${minValue} in ${targetTotalBeats} beats`);
+    }
+
+    while (actualNotes < targetNotes && remainingBeats >= minValue - TOLERANCE) {
+      const notesRemaining = targetNotes - actualNotes;
+      const minSpaceNeeded = notesRemaining * minValue;
+      const maxPossibleValue = Math.min(
+        maxValue,
+        remainingBeats - minSpaceNeeded + minValue,
+        remainingBeats
+      );
+
+      if (maxPossibleValue < minValue - TOLERANCE) {
+        console.warn(`Calculated maxPossibleValue (${maxPossibleValue}) is less than minValue (${minValue}). Cannot proceed.`);
+        break;
+      }
+
+      const eligibleDurations = availableDurations.filter(d => 
+        d.value <= maxPossibleValue + TOLERANCE && d.value >= minValue - TOLERANCE
+      );
+      
+      if (eligibleDurations.length === 0) {
+        console.warn("No eligible durations found for current constraints.");
+        break;
+      }
+      
+      const randomIndex = Math.floor(Math.random() * eligibleDurations.length);
+      const durationToUse = eligibleDurations[randomIndex];
+
+      localResult.push({
+        type: "note",
+        duration: durationToUse.name,
+        value: durationToUse.value
+      });
+      
+      remainingBeats -= durationToUse.value;
+      actualNotes++;
+      remainingNotesToPlace--;
+      
+      if (actualNotes < targetNotes && Math.random() < restProb && remainingBeats > minSpaceNeeded - TOLERANCE) {
+        const maxRestDuration = remainingBeats - minSpaceNeeded;
+        
+        if (maxRestDuration >= absoluteMinDurationValue - TOLERANCE) {
+          const eligibleRestDurations = availableDurations.filter(d => 
+            d.value <= maxRestDuration + TOLERANCE
+          );
+          
+          if (eligibleRestDurations.length > 0) {
+            const randomRestIndex = Math.floor(Math.random() * eligibleRestDurations.length);
+            const restToUse = eligibleRestDurations[randomRestIndex];
+            
             localResult.push({
-              type: "note",
-              duration: randomDuration.name,
-              value: randomDuration.value
+              type: "rest",
+              duration: restToUse.name,
+              value: restToUse.value
             });
+            
+            remainingBeats -= restToUse.value;
+          }
         }
-        return localResult;
+      }
     }
 
-    function generateRhythmWithRests(
-        targetTotalBeats: number,
-        targetNotes: number,
-        minValue: number,
-        maxValue: number,
-        defaultShortestDurationStr: DurationString,
-        restProb: number
-    ): RhythmEvent[] {
-        const localResult: RhythmEvent[] = [];
-        let remainingBeats: number = targetTotalBeats;
-        let remainingNotes: number = targetNotes;
-
-        const getMinSpaceNeededForNotes = (notes: number, minVal: number): number => {
-            return notes * minVal;
-        };
-
-        const getRandomDuration = (minVal: number, maxVal: number): { name: DurationString; value: number } | null => {
-             const availableDurations = durationStrings
-                .map(name => ({ name, value: durationValues[name] }))
-                .filter(({ value }) => value >= minVal - TOLERANCE && value <= maxVal + TOLERANCE);
-
-            if (availableDurations.length === 0) {
-                 if (minValue <= maxVal + TOLERANCE) {
-                     return { name: defaultShortestDurationStr, value: minValue };
-                 }
-                 console.warn("Could not find random duration between", minVal, maxVal);
-                 return null;
-            }
-            const randomIndex: number = Math.floor(Math.random() * availableDurations.length);
-            return availableDurations[randomIndex];
-        };
-
-        while (remainingNotes > 0 && remainingBeats >= absoluteMinDurationValue - TOLERANCE) {
-            if (remainingBeats < minValue - TOLERANCE) {
-                 console.warn(`Remaining beats (${remainingBeats}) too low for shortest duration (${minValue}). Stopping generation.`);
-                 break;
-            }
-
-            const minSpaceNeededForAllRemaining = getMinSpaceNeededForNotes(remainingNotes, minValue);
-            if (remainingBeats < minSpaceNeededForAllRemaining - TOLERANCE) {
-                 console.warn(`Not enough remaining beats (${remainingBeats}) for the required ${remainingNotes} notes (min space needed: ${minSpaceNeededForAllRemaining}). Stopping generation.`);
-                 break;
-            }
-
-            const maxPossibleValue = Math.min(
-                maxValue,
-                remainingBeats - (remainingNotes > 1 ? getMinSpaceNeededForNotes(remainingNotes - 1, minValue) : 0),
-                remainingBeats
-            );
-
-            if (maxPossibleValue < minValue - TOLERANCE) {
-                console.warn(`Calculated maxPossibleValue (${maxPossibleValue}) is less than minValue (${minValue}). Cannot proceed.`);
-                break;
-            }
-
-            const durationToUse = getRandomDuration(minValue, maxPossibleValue);
-            if (!durationToUse) {
-                 console.warn("Failed to get random duration. Stopping generation.");
-                 break;
-            }
-
-            const beatsAfterThisEvent = remainingBeats - durationToUse.value;
-            const minSpaceNeededAfterEvent = getMinSpaceNeededForNotes(remainingNotes -1, minValue);
-            const canPlaceNoteHere = beatsAfterThisEvent >= minSpaceNeededAfterEvent - TOLERANCE;
-
-            const isRest: boolean = allowRests &&
-                                   canPlaceNoteHere &&
-                                   Math.random() < restProb &&
-                                   localResult.length > 0;
-
-            localResult.push({
-              type: isRest ? "rest" : "note",
-              duration: durationToUse.name,
-              value: durationToUse.value
-            });
-
-            remainingBeats -= durationToUse.value;
-            if (!isRest) {
-              remainingNotes--;
-            }
-
-            if (Math.abs(remainingBeats) < TOLERANCE) remainingBeats = 0;
-        }
-
-        if (remainingNotes > 0) {
-            console.warn(`Could only place ${targetNotes - remainingNotes} notes. ${remainingNotes} notes could not be placed.`);
-        }
-
-        fillRemainingBeatsWithRests(localResult, remainingBeats);
-
-        return localResult;
+    if (remainingNotesToPlace > 0) {
+      console.warn(`Could only place ${targetNotes - remainingNotesToPlace} notes. ${remainingNotesToPlace} notes could not be placed.`);
     }
 
-    function fillRemainingBeatsWithRests(
-        events: RhythmEvent[],
-        remaining: number
-    ): void {
-        let remainingBeats = remaining;
-        if (remainingBeats <= TOLERANCE) return;
+    if (remainingBeats > TOLERANCE) {
+      fillRemainingBeatsWithRests(localResult, remainingBeats);
+    }
+    
+    return localResult;
+  }
+  
+  function fillRemainingBeatsWithRests(
+    events: RhythmEvent[], 
+    remaining: number
+  ): void {
+    let remainingBeats = remaining;
+    if (remainingBeats <= TOLERANCE) return;
 
-        const availableRestDurations = durationStrings
-                .map(name => ({ name, value: durationValues[name] }))
-                .sort((a, b) => b.value - a.value);
+    const availableRestDurations = durationStrings
+      .map(name => ({ name, value: durationValues[name] }))
+      .sort((a, b) => b.value - a.value);
 
-        if (availableRestDurations.length === 0) return;
-
-        while (remainingBeats >= absoluteMinDurationValue - TOLERANCE) {
-            let durationToAdd: { name: DurationString; value: number } | null = null;
-            for (const dur of availableRestDurations) {
-                if (dur.value <= remainingBeats + TOLERANCE) {
-                    durationToAdd = dur;
-                    break;
-                }
-            }
-
-            if (durationToAdd) {
-                events.push({
-                    type: "rest",
-                    duration: durationToAdd.name,
-                    value: durationToAdd.value
-                });
-                remainingBeats -= durationToAdd.value;
-                if (Math.abs(remainingBeats) < TOLERANCE) remainingBeats = 0;
-            } else {
-                console.warn(`Could not fill remaining ${remainingBeats.toFixed(3)} beats with rests. Smallest rest is ${absoluteMinDurationValue}.`);
-                break;
-            }
+    while (remainingBeats >= absoluteMinDurationValue - TOLERANCE) {
+      let durationToAdd: { name: DurationString; value: number } | null = null;
+      
+      for (const dur of availableRestDurations) {
+        if (dur.value <= remainingBeats + TOLERANCE) {
+          durationToAdd = dur; 
+          break;
         }
+      }
+      
+      if (durationToAdd) {
+        events.push({ 
+          type: "rest", 
+          duration: durationToAdd.name, 
+          value: durationToAdd.value 
+        });
+        remainingBeats -= durationToAdd.value;
+        if (Math.abs(remainingBeats) < TOLERANCE) remainingBeats = 0;
+      } else { 
+        console.warn(`Could not fill remaining ${remainingBeats.toFixed(3)} beats with rests. Smallest rest is ${absoluteMinDurationValue}.`);
+        break; 
+      }
     }
-
-    if (!allowRests) {
-        return generateFixedNumberOfNotes(n, minDurationValue, maxDurationValue);
-    } else {
-        return generateRhythmWithRests(totalBeats, n, minDurationValue, maxDurationValue, currentShortest, restProbability);
-    }
+  }
 };
 
 export const availableNotes = ({
