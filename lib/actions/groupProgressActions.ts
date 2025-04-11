@@ -1,14 +1,17 @@
-"use server"
-import { ID, Query, Databases, Models, Client } from "node-appwrite";
-import { createAdminClient, createSessionClient } from "../appwrite";
+"use server";
+import { ID, Query, Databases, Models } from "node-appwrite";
+import { createAdminClient } from "../appwrite";
 import { appwriteConfig } from "../appwrite/config";
 
+const MAX_ACCURACY_HISTORY = 100;
+const MAX_TONE_ACCURACY_HISTORY = 50;
 
 export interface ExerciseState {
     currentBPM: number;
     accuracyLastAttempt: number | null;
     isGraduated: boolean;
-    unlocked: boolean
+    unlocked: boolean;
+    accuracyHistory: number[];
 }
 
 export interface GroupProgressDocument extends Models.Document {
@@ -18,24 +21,56 @@ export interface GroupProgressDocument extends Models.Document {
     level: number;
     exerciseStates: string;
     isActive: boolean;
-    lastPracticed: string
+    lastPracticed: string;
 }
-const databaseId = appwriteConfig.databaseId
-const groupProgressCollectionId = appwriteConfig.groupProgressCollectionId
 
+export interface ToneAccuracyDocument extends Models.Document {
+    userID: string;
+    context: string;
+    scaleDegree: string;
+    accuracyHistory: number[];
+    lastUpdated: string;
+}
+
+const databaseId = appwriteConfig.databaseId;
+const groupProgressCollectionId = appwriteConfig.groupProgressCollectionId;
+const toneAccuracyCollectionId = appwriteConfig.toneAccuracyCollectionId;
+
+interface ParsedGroupProgressDocument extends Omit<GroupProgressDocument, 'exerciseStates'> {
+    exerciseStates: { [key: string]: ExerciseState };
+}
+
+interface EligibleExercise {
+    groupID: string;
+    melodyLength: number;
+    bpm: number;
+}
 
 function safeParseExerciseStates(jsonString: string | null | undefined): { [key: string]: ExerciseState } {
     if (!jsonString) {
-        console.log("safeParseExerciseStates: Input is null or empty, returning {}.");
         return {};
     }
     try {
         const parsed = JSON.parse(jsonString);
-        console.log("safeParseExerciseStates: JSON.parse successful. Type:", typeof parsed, "Value:", parsed);
         if (typeof parsed === 'object' && parsed !== null) {
+            for (const key in parsed) {
+                const state = parsed[key];
+                if (typeof state !== 'object' || state === null ||
+                    typeof state.currentBPM !== 'number' ||
+                    (state.accuracyLastAttempt !== null && typeof state.accuracyLastAttempt !== 'number') ||
+                    typeof state.isGraduated !== 'boolean' ||
+                    typeof state.unlocked !== 'boolean' ||
+                    (state.accuracyHistory !== undefined && !Array.isArray(state.accuracyHistory))
+                ) {
+                    console.warn(`safeParseExerciseStates: Invalid structure for key "${key}". Removing entry.`);
+                    delete parsed[key];
+                } else if (state.accuracyHistory === undefined) {
+                    state.accuracyHistory = [];
+                }
+            }
             return parsed;
         } else {
-            console.warn("safeParseExerciseStates: Parsed data is not a non-null object. Type:", typeof parsed);
+             console.warn("safeParseExerciseStates: Parsed data is not a non-null object.");
             return {};
         }
     } catch (e) {
@@ -50,28 +85,20 @@ export async function getGroupProgress(
     groupID: string,
 ): Promise<GroupProgressDocument | null> {
     try {
-        const appwriteServices = await createAdminClient();
-        const databases = appwriteServices.databases
-
+        const { databases } = await createAdminClient();
         const queries = [
             Query.equal("userID", userID),
             Query.equal("context", context),
             Query.equal("groupID", groupID),
             Query.limit(1)
         ];
-
-        const response = await databases.listDocuments<GroupProgressDocument>
-            (databaseId, groupProgressCollectionId, queries)
-
-        if (response.total > 0) {
-            return response.documents[0]
-        } else {
-            console.log("ejercicio no encontrado para", { userID, context, groupID })
-            return null
-        }
+        const response = await databases.listDocuments<GroupProgressDocument>(
+            databaseId, groupProgressCollectionId, queries
+        );
+        return response.total > 0 ? response.documents[0] : null;
     } catch (error) {
-        console.error("Error fetching ExerciseState:", error);
-        throw new Error(`Failed to get ExerciseState: ${error instanceof Error ? error.message : String(error)}`)
+        console.error("Error fetching GroupProgress:", error);
+        throw new Error(`Failed to get GroupProgress: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
 
@@ -79,142 +106,124 @@ export async function getGroupProgressParsed(
     userID: string,
     context: string,
     groupID: string
-): Promise<(Omit<GroupProgressDocument, 'exerciseStates'> & { exerciseStates: { [key: string]: ExerciseState } }) | null> {
-    const rawDoc = await getGroupProgress(userID, context, groupID)
-    if (!rawDoc) {
-        return null
-    }
-    const parsedStates = safeParseExerciseStates(rawDoc.exerciseStates)
-    return {
-        ...rawDoc,
-        exerciseStates: parsedStates
+): Promise<ParsedGroupProgressDocument | null> {
+    try {
+        const rawDoc = await getGroupProgress(userID, context, groupID);
+        if (!rawDoc) return null;
+        const parsedStates = safeParseExerciseStates(rawDoc.exerciseStates);
+        return { ...rawDoc, exerciseStates: parsedStates };
+    } catch (error) {
+        console.error("Error in getGroupProgressParsed:", error);
+        throw new Error(`Failed to parse GroupProgress: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
+
 export async function createGroupProgress(
     userID: string,
     context: string,
     groupID: string,
     level: number
 ): Promise<GroupProgressDocument> {
-
     try {
-        const adminClient = await createAdminClient()
-        const databases = adminClient.databases
-
+        const { databases } = await createAdminClient();
         const initialExerciseStatesObject: { [melodyLength: string]: ExerciseState } = {
-            "2": { currentBPM: 60, accuracyLastAttempt: null, isGraduated: false, unlocked: true }
-        }
-
-        const initialExerciseStatesString = JSON.stringify(initialExerciseStatesObject)
-        console.log("DEBUG: String being saved by createGroupProgress:", initialExerciseStatesString);
-        const newDocumentData = {
-            userID,
-            context,
-            groupID,
-            level,
-            exerciseStates: initialExerciseStatesString,
-            isActive: true,
-            lastPracticed: new Date().toISOString()
+            "2": { currentBPM: 60, accuracyLastAttempt: null, isGraduated: false, unlocked: true, accuracyHistory: [] }
         };
-        console.log("DEBUG createGroupProgress: Saving data:", newDocumentData);
-        console.log("DEBUG createGroupProgress: Type of exerciseStates being saved:", typeof newDocumentData.exerciseStates);
+        const initialExerciseStatesString = JSON.stringify(initialExerciseStatesObject);
+        const newDocumentData = { userID, context, groupID, level, exerciseStates: initialExerciseStatesString, isActive: true, lastPracticed: new Date().toISOString() };
         const newDocument = await databases.createDocument<GroupProgressDocument>(
-            databaseId,
-            groupProgressCollectionId,
-            ID.unique(),
-            newDocumentData
-        )
-        return newDocument
+            databaseId, groupProgressCollectionId, ID.unique(), newDocumentData
+        );
+        return newDocument;
     } catch (error) {
         console.error("Error creating GroupProgress:", error);
-        throw new Error(`Failed to create GroupProgress: ${error instanceof Error ? error.message : String(error)}`)
+        throw new Error(`Failed to create GroupProgress: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
+
 export async function updateGroupProgress(
     documentId: string,
-    updatedData: Partial<Omit<GroupProgressDocument,
-        keyof Models.Document | '$id' | '$collectionId' | '$databaseId' | '$createdAt' | '$updatedAt' | '$permissions' | 'exerciseStates'>
-        & { exerciseStates?: { [key: string]: ExerciseState } }>
+    updatedData: Partial<Pick<GroupProgressDocument, 'level' | 'isActive' | 'lastPracticed'>> & {
+        exerciseStates?: { [key: string]: ExerciseState }
+    }
 ): Promise<GroupProgressDocument> {
     try {
-        const adminClient = await createAdminClient()
-        const databases = adminClient.databases
-
-        const dataToUpdate: { [key: string]: any } = { ...updatedData }
-
+        const { databases } = await createAdminClient();
+        const dataToUpdate: { [key: string]: any } = {};
+        if (updatedData.level !== undefined) dataToUpdate.level = updatedData.level;
+        if (updatedData.isActive !== undefined) dataToUpdate.isActive = updatedData.isActive;
+        if (updatedData.lastPracticed !== undefined) dataToUpdate.lastPracticed = updatedData.lastPracticed;
         if (updatedData.exerciseStates) {
-            dataToUpdate.exerciseStates = JSON.stringify(updatedData.exerciseStates)
-        } else if (updatedData.hasOwnProperty('exerciseStates') && updatedData.exerciseStates === undefined) {
-
-            delete dataToUpdate.exerciseStates;
-        }
-
-
+            if (typeof updatedData.exerciseStates !== 'object' || updatedData.exerciseStates === null) throw new Error("Invalid exerciseStates format");
+            dataToUpdate.exerciseStates = JSON.stringify(updatedData.exerciseStates);
+        } else if (updatedData.hasOwnProperty('exerciseStates') && updatedData.exerciseStates === undefined) delete dataToUpdate.exerciseStates;
         if (Object.keys(dataToUpdate).length === 0) {
-            console.log("No hay datos para actualizar. Returning current state might be needed or throw error.");
-
-            const currentDoc = await databases.getDocument<GroupProgressDocument>(databaseId, groupProgressCollectionId, documentId);
-            return currentDoc;
-
+            return await databases.getDocument<GroupProgressDocument>(databaseId, groupProgressCollectionId, documentId);
         }
-
         const updatedDocument = await databases.updateDocument<GroupProgressDocument>(
-            databaseId,
-            groupProgressCollectionId,
-            documentId,
-            dataToUpdate
-        )
-
-        return updatedDocument
+            databaseId, groupProgressCollectionId, documentId, dataToUpdate
+        );
+        return updatedDocument;
     } catch (error) {
         console.error("Error updating GroupProgress:", error);
-        throw new Error(`Failed to update GroupProgress: ${error instanceof Error ? error.message : String(error)}`)
+        throw new Error(`Failed to update GroupProgress document ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
+
 export async function handleExerciseCompletion(userId: string,
     context: string,
     groupId: string,
     melodyLength: number,
-    accuracy: number) {
+    accuracy: number
+): Promise<{ success: true, newBPM: number, level: number } | { success: false, error: string }> {
     try {
-        const currentProgress = await getGroupProgressParsed(userId, context, groupId)
-        if (!currentProgress) {
-            console.error("Progress not found, cannot update.");
-            throw new Error("Progress document not found for update.");
-        }
+        const currentProgress = await getGroupProgressParsed(userId, context, groupId);
+        if (!currentProgress) throw new Error("Progress document not found for update.");
         const exerciseKey = String(melodyLength);
-        console.log("DEBUG: Accessing state with key:", exerciseKey, " (melodyLength:", melodyLength, ")")
-        console.log("DEBUG: Full exerciseStates object:", currentProgress.exerciseStates);
         const currentExerciseState = currentProgress.exerciseStates[exerciseKey];
-        if (!currentExerciseState) {
-            console.error(`Exercise state for length ${melodyLength} not found.`);
-            throw new Error(`Exercise state for length ${melodyLength} not found.`);
-        }
-        let newBPM = currentExerciseState.currentBPM
-        if (accuracy >= 0.8 && newBPM < 180) {
-            newBPM = Math.min(currentExerciseState.currentBPM + 5, 180)
-        }
-        const updatedExerciseStates = {
-            ...currentProgress.exerciseStates,
-            [exerciseKey]: {
-                ...currentExerciseState,
-                currentBPM: newBPM,
-                accuracyLastAttempt: accuracy,
+        if (!currentExerciseState) throw new Error(`Exercise state for length ${melodyLength} not found`);
+
+        let newBPM = currentExerciseState.currentBPM;
+        const BpmIncreaseThreshold = 0.8; const MaxBPM = 180; const BpmIncrement = 5; const UnlockThresholdBPM = 100;
+        if (accuracy >= BpmIncreaseThreshold && newBPM < MaxBPM) newBPM = Math.min(currentExerciseState.currentBPM + BpmIncrement, MaxBPM);
+
+        const currentHistory = currentExerciseState.accuracyHistory || [];
+        const updatedHistory = [...currentHistory, accuracy];
+        if (updatedHistory.length > MAX_ACCURACY_HISTORY) updatedHistory.shift();
+
+        const updatedExerciseStates = { ...currentProgress.exerciseStates };
+        updatedExerciseStates[exerciseKey] = { ...currentExerciseState, currentBPM: newBPM, accuracyLastAttempt: accuracy, isGraduated: newBPM >= MaxBPM, accuracyHistory: updatedHistory };
+
+        if (melodyLength === 2 && newBPM >= UnlockThresholdBPM) {
+            const nextMelodyLengthKey = String(melodyLength + 1);
+            if (!updatedExerciseStates[nextMelodyLengthKey]?.unlocked) {
+                updatedExerciseStates[nextMelodyLengthKey] = { currentBPM: 60, accuracyLastAttempt: null, isGraduated: false, unlocked: true, accuracyHistory: [] };
             }
         }
-        const updatedData = {
-            exerciseStates: updatedExerciseStates,
-            lastPracticed: new Date().toISOString()
-        }
-        console.log("DEBUG handleExerciseCompletion: Data BEFORE calling updateGroupProgress:", updatedData);
-        console.log("DEBUG handleExerciseCompletion: Type of exerciseStates in updatedData:", typeof updatedData.exerciseStates); 
-        if(updatedData.exerciseStates) console.log("DEBUG handleExerciseCompletion: exerciseStates OBJECT:", updatedData.exerciseStates);
-        await updateGroupProgress(currentProgress.$id, updatedData)
-        console.log(`Server Action: Progress updated successfully for user ${userId}, group ${groupId}. New BPM: ${newBPM}`);
-        return { success: true, newBPM: newBPM }
+
+        const updatedData = { exerciseStates: updatedExerciseStates, lastPracticed: new Date().toISOString() };
+        await updateGroupProgress(currentProgress.$id, updatedData);
+        return { success: true, newBPM: newBPM, level: currentProgress.level };
     } catch (error) {
         console.error("Error in handleExerciseCompletion Server Action:", error);
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
+        return { success: false, error: error instanceof Error ? error.message : "Unknown error during exercise completion handling" };
+    }
+}
+
+async function getAllProgressForLevel(
+    userID: string,
+    context: string,
+    level: number
+): Promise<ParsedGroupProgressDocument[]> {
+    try {
+        const { databases } = await createAdminClient();
+        const MAX_GROUPS_PER_LEVEL = 100;
+        const queries = [ Query.equal("userID", userID), Query.equal("context", context), Query.equal("level", level), Query.limit(MAX_GROUPS_PER_LEVEL) ];
+        const response = await databases.listDocuments<GroupProgressDocument>( databaseId, groupProgressCollectionId, queries );
+        return response.documents.map(doc => ({ ...doc, exerciseStates: safeParseExerciseStates(doc.exerciseStates) }));
+    } catch (error) {
+        console.error(`Error fetching all progress for level ${level}:`, error);
+        throw new Error(`Failed to get all progress for level ${level}: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
 
@@ -222,46 +231,30 @@ export async function completeAndGetNextExercise(userId: string,
     context: string,
     completedGroupId: string,
     completedMelodyLength: number,
-    accuracy: number): Promise<{
-        success: true; nextExercise: {
-            groupID: string;
-            melodyLength: number;
-            bpm: number;
+    overallAccuracy: number
+): Promise<{ success: true; nextExercise: EligibleExercise; } | { success: true; allGraduatedAtLevel: true; level: number; } | { success: false; error: string; }> {
+    try {
+        const updateResult = await handleExerciseCompletion( userId, context, completedGroupId, completedMelodyLength, overallAccuracy );
+        if (!updateResult.success) return { success: false, error: updateResult.error };
+        const currentLevel = updateResult.level;
+        const allProgressAtLevel = await getAllProgressForLevel(userId, context, currentLevel);
+        const eligibleExercises: EligibleExercise[] = [];
+        for (const doc of allProgressAtLevel) {
+            for (const key in doc.exerciseStates) {
+                const state = doc.exerciseStates[key];
+                if (state.unlocked && !state.isGraduated) {
+                    eligibleExercises.push({ groupID: doc.groupID, melodyLength: Number(key), bpm: state.currentBPM });
+                }
+            }
         }
-    } | {
-        success: false;
-        error: string;
-    }> {
-    console.log(`completeAndGetNextExercise: Starting for user ${userId} after completing group ${completedGroupId}, length ${completedMelodyLength}`);
-    const updateResult = await handleExerciseCompletion(
-        userId,
-        context,
-        completedGroupId,
-        completedMelodyLength,
-        accuracy
-    )
-    if (!updateResult.success) {
-        console.error("completeAndGetNextExercise: Failed during handleExerciseCompletion. Cannot determine next exercise.");
-        return { success: false, error: updateResult.error || "Unknown error" };
+        if (eligibleExercises.length === 0) return { success: true, allGraduatedAtLevel: true, level: currentLevel };
+        const randomIndex = Math.floor(Math.random() * eligibleExercises.length);
+        const nextExercise = eligibleExercises[randomIndex];
+        return { success: true, nextExercise: nextExercise, };
+    } catch (error) {
+        console.error("Error in completeAndGetNextExercise:", error);
+        return { success: false, error: error instanceof Error ? error.message : "Unknown error determining next exercise" };
     }
-    const nextGroupID = completedGroupId;
-    const nextMelodyLength = completedMelodyLength;
-    const nextBPM = updateResult.newBPM;
-
-
-    if (typeof nextBPM !== 'number') {
-        return { success: false, error: "BPM value is undefined" };
-    }
-
-    console.log(`completeAndGetNextExercise: Next exercise determined (MVP Logic) -> Group: ${nextGroupID}, Length: ${nextMelodyLength}, BPM: ${nextBPM}`);
-    return {
-        success: true,
-        nextExercise: {
-            groupID: nextGroupID,
-            melodyLength: nextMelodyLength,
-            bpm: nextBPM,
-        },
-    };
 }
 
 export async function getFirstExercise(
@@ -269,50 +262,106 @@ export async function getFirstExercise(
     context: string,
     initialGroupID: string,
     initialLevel: number
-): Promise<{
-    success: true;
-    exerciseParams: {
-        groupID: string;
-        melodyLength: number;
-        bpm: number;
-    }
-} | {
-    success: false;
-    error: string;
-}> {
-    console.log(`getFirstExercise: Attempting to find or create progress for user ${userID}, context ${context}, group ${initialGroupID}`);
+): Promise<{ success: true; exerciseParams: EligibleExercise; } | { success: false; error: string; }> {
     try {
         let progressDoc = await getGroupProgressParsed(userID, context, initialGroupID);
-        let exerciseBPM: number;
-        const initialMelodyLength = 2;
-        if (progressDoc) {
-            console.log(`getFirstExercise: Found existing progress document ${progressDoc.$id}`);
-            const exerciseState = progressDoc.exerciseStates[String(initialMelodyLength)];
-            if (exerciseState && exerciseState.unlocked) {
-                exerciseBPM = exerciseState.currentBPM;
-                console.log(`getFirstExercise: Using existing BPM ${exerciseBPM} for length ${initialMelodyLength}`);
-            } else {
-                console.warn(`getFirstExercise: Exercise state for length ${initialMelodyLength} not found or not unlocked in existing doc. Defaulting to 60 BPM.`);
-                exerciseBPM = 60;
-            }
-        } else {
-            console.log(`getFirstExercise: No progress found. Creating new document.`);
+        const initialMelodyLength = 2; const initialMelodyLengthKey = String(initialMelodyLength); let exerciseBPM = 60;
+        if (!progressDoc) {
             const newDoc = await createGroupProgress(userID, context, initialGroupID, initialLevel);
             exerciseBPM = 60;
             progressDoc = await getGroupProgressParsed(userID, context, initialGroupID);
-            if (!progressDoc) throw new Error("Failed to retrieve the document immediately after creation.");
-            console.log(`getFirstExercise: Created new progress document ${progressDoc.$id}. Starting BPM: ${exerciseBPM}`);
-        }
-        return {
-            success: true,
-            exerciseParams: {
-                groupID: initialGroupID,
-                melodyLength: initialMelodyLength,
-                bpm: exerciseBPM,
+             if (!progressDoc) throw new Error("Failed to retrieve the document immediately after creation.");
+        } else {
+            const exerciseState = progressDoc.exerciseStates[initialMelodyLengthKey];
+            if (exerciseState && exerciseState.unlocked) exerciseBPM = exerciseState.currentBPM;
+            else {
+                 exerciseBPM = 60;
+                 const updatedStates = { ...progressDoc.exerciseStates, [initialMelodyLengthKey]: { currentBPM: exerciseBPM, accuracyLastAttempt: null, isGraduated: false, unlocked: true, accuracyHistory: progressDoc.exerciseStates[initialMelodyLengthKey]?.accuracyHistory || [] } };
+                 await updateGroupProgress(progressDoc.$id, { exerciseStates: updatedStates });
             }
-        };
+        }
+        return { success: true, exerciseParams: { groupID: initialGroupID, melodyLength: initialMelodyLength, bpm: exerciseBPM, } };
     } catch (error) {
         console.error("Error in getFirstExercise:", error);
         return { success: false, error: error instanceof Error ? error.message : "Unknown error determining first exercise" };
+    }
+}
+
+
+export async function recordToneAccuracy(
+    userID: string,
+    context: string,
+    scaleDegree: string,
+    isCorrect: boolean
+): Promise<{ success: boolean, error?: string }> {
+    if (!toneAccuracyCollectionId) {
+        console.error("Tone Accuracy Collection ID is not configured.");
+        return { success: false, error: "Tone accuracy tracking is not configured." };
+    }
+     if (!scaleDegree || typeof scaleDegree !== 'string' || scaleDegree.trim() === '') {
+         console.warn("recordToneAccuracy: Invalid scaleDegree provided:", scaleDegree);
+         return { success: false, error: "Invalid scale degree." };
+     }
+
+    try {
+        const { databases } = await createAdminClient();
+        const accuracyValue = isCorrect ? 1 : 0;
+        const nowISO = new Date().toISOString();
+
+        const queries = [
+            Query.equal("userID", userID),
+            Query.equal("context", context),
+            Query.equal("scaleDegree", scaleDegree),
+            Query.limit(1)
+        ];
+
+        const existingDocs = await databases.listDocuments<ToneAccuracyDocument>(
+            databaseId,
+            toneAccuracyCollectionId,
+            queries
+        );
+
+        if (existingDocs.total > 0) {
+            const docToUpdate = existingDocs.documents[0];
+            const currentHistory = docToUpdate.accuracyHistory || [];
+            const updatedHistory = [...currentHistory, accuracyValue];
+
+            if (updatedHistory.length > MAX_TONE_ACCURACY_HISTORY) {
+                updatedHistory.shift();
+            }
+
+            await databases.updateDocument<ToneAccuracyDocument>(
+                databaseId,
+                toneAccuracyCollectionId,
+                docToUpdate.$id,
+                {
+                    accuracyHistory: updatedHistory,
+                    lastUpdated: nowISO
+                }
+            );
+             console.log(`Tone accuracy updated for user ${userID}, context ${context}, degree ${scaleDegree}`);
+
+        } else {
+            const newDocumentData = {
+                userID,
+                context,
+                scaleDegree,
+                accuracyHistory: [accuracyValue],
+                lastUpdated: nowISO
+            };
+            await databases.createDocument<ToneAccuracyDocument>(
+                databaseId,
+                toneAccuracyCollectionId,
+                ID.unique(),
+                newDocumentData
+            );
+             console.log(`Tone accuracy created for user ${userID}, context ${context}, degree ${scaleDegree}`);
+        }
+
+        return { success: true };
+
+    } catch (error) {
+        console.error(`Error recording tone accuracy for ${userID}, ${context}, ${scaleDegree}:`, error);
+        return { success: false, error: error instanceof Error ? error.message : "Failed to record tone accuracy" };
     }
 }

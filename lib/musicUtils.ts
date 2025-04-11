@@ -583,23 +583,31 @@ export const createFullSequence = (
   return fullSequence;
 };
 
-export const createMetronomeEvents = (totalBeats: number): MetronomeEvent[] => {
+export const createMetronomeEvents = (
+  totalBeats: number,
+  beatsPerMeasure: number = 4 
+): MetronomeEvent[] => {
   const events: MetronomeEvent[] = [];
-  const beatsPerMeasure = 4;
-  const roundedBeats = Math.ceil(totalBeats);
 
-  for (let i = 0; i < roundedBeats; i++) {
-    const beatInMeasure = i % beatsPerMeasure;
-    const isAccent = beatInMeasure === 0;
-    events.push({
-      time: i,
-      note: isAccent ? "C5" : "C4",
-      velocity: isAccent ? 0.8 : 0.5,
-      isAccent: isAccent
-    });
+ 
+  if (totalBeats < 0) {
+      console.warn("createMetronomeEvents called with negative totalBeats:", totalBeats);
+      return [];
   }
-  return events;
-};
+
+
+  for (let i = 0; i <= totalBeats; i++) {
+      const beatInMeasure = i % beatsPerMeasure;
+      const isAccent = beatInMeasure === 0;
+      events.push({
+          time: i, 
+          note: isAccent ? "C5" : "C4", 
+          velocity: isAccent ? 0.8 : 0.5,
+          isAccent: isAccent
+      });
+  }
+  
+  return events;}
 
 export const playSequence = async ({
   generatedNotes = [],

@@ -9,3 +9,11 @@ export const allNotes: string[] = [
     "C7", "C#7", "D7", "D#7", "E7", "F7", "F#7", "G7", "G#7", "A7", "A#7", "B7",
     "C8", "C#8", "D8", "D#8", "E8", "F8", "F#8", "G8", "G#8", "A8", "A#8", "B8"
   ];
+
+  export const calculateAverage = (numbers: number[]): number => {
+    if (numbers.length === 0) {
+        return 0
+    }
+    const sum = numbers.reduce((acc, current) => acc + current, 0);
+    return sum / numbers.length;
+};
